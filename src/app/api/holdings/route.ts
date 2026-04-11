@@ -96,6 +96,25 @@ export async function POST(request: NextRequest) {
 export async function DELETE(request: NextRequest) {
   try {
     const { id } = await request.json();
+
+    // First, get the holding to find its scheme_code
+    const { data: holding, error: fetchError } = await supabase
+      .from('holdings')
+      .select('scheme_code')
+      .eq('id', id)
+      .single();
+
+    if (fetchError) throw fetchError;
+
+    // Delete all transactions for this fund
+    const { error: txError } = await supabase
+      .from('transactions')
+      .delete()
+      .eq('scheme_code', holding.scheme_code);
+
+    if (txError) throw txError;
+
+    // Delete the holding
     const { error } = await supabase
       .from('holdings')
       .delete()
