@@ -6,7 +6,7 @@ import { useTheme } from './ThemeProvider';
 
 const navLinks = [
   { href: '/', label: 'Portfolio' },
-  { href: '/stocks', label: 'Stock Picks' },
+  // { href: '/stocks', label: 'Stock Picks' },
   { href: '/insights', label: 'Insights' },
 ];
 
