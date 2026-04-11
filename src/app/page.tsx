@@ -55,7 +55,7 @@ export default function PortfolioDashboard() {
         <>
           <PortfolioChart holdings={holdings} transactions={transactions} getNavData={getNavData} />
           <AISummaryPanel holdings={holdings} summary={summary} />
-          <PortfolioTable holdings={holdings} summary={summary} onRemove={removeHolding} getNavData={getNavData} />
+          <PortfolioTable holdings={holdings} transactions={transactions} summary={summary} onRemove={removeHolding} getNavData={getNavData} />
         </>
       )}
 

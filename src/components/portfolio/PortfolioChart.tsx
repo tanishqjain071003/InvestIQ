@@ -1,7 +1,7 @@
 'use client';
 
 import { useMemo } from 'react';
-import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
+import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceDot } from 'recharts';
 import { FundWithCurrentData, Transaction } from '@/types/portfolio';
 import { MFSchemeData } from '@/types/mf-api';
 import { formatINR, formatMFDate } from '@/lib/formatters';
@@ -128,6 +128,56 @@ export default function PortfolioChart({ holdings, transactions, getNavData }: P
     });
   }, [holdings, transactions, getNavData]);
 
+  // Build entry points: for each transaction, find the closest chart date and its value
+  const entryPoints = useMemo(() => {
+    if (chartData.length === 0 || transactions.length === 0) return [];
+
+    // Build a map from date string to chart value for fast lookup
+    const chartMap = new Map<string, number>();
+    const chartDates: { date: string; ts: number }[] = [];
+    for (const d of chartData) {
+      chartMap.set(d.date, d.value);
+      chartDates.push({ date: d.date, ts: parseMFDate(d.date).getTime() });
+    }
+
+    // Group transactions by date to avoid overlapping markers
+    const txByDate = new Map<string, { totalAmount: number; funds: string[] }>();
+    for (const tx of transactions) {
+      const txTs = new Date(tx.transaction_date).getTime();
+      // Find closest chart date
+      let closest = chartDates[0];
+      let closestDiff = Math.abs(txTs - closest.ts);
+      for (const cd of chartDates) {
+        const diff = Math.abs(txTs - cd.ts);
+        if (diff < closestDiff) {
+          closest = cd;
+          closestDiff = diff;
+        }
+      }
+      // Only match if within 3 days
+      if (closestDiff > 3 * 86400000) continue;
+
+      const existing = txByDate.get(closest.date);
+      if (existing) {
+        existing.totalAmount += tx.amount;
+        if (!existing.funds.includes(tx.scheme_name)) {
+          existing.funds.push(tx.scheme_name);
+        }
+      } else {
+        txByDate.set(closest.date, { totalAmount: tx.amount, funds: [tx.scheme_name] });
+      }
+    }
+
+    const points: { date: string; value: number; amount: number; funds: string[] }[] = [];
+    for (const [date, info] of txByDate) {
+      const value = chartMap.get(date);
+      if (value !== undefined) {
+        points.push({ date, value, amount: info.totalAmount, funds: info.funds });
+      }
+    }
+    return points;
+  }, [chartData, transactions]);
+
   if (chartData.length < 2) return null;
 
   const minValue = Math.min(...chartData.map(d => d.value));
@@ -138,7 +188,13 @@ export default function PortfolioChart({ holdings, transactions, getNavData }: P
 
   return (
     <GlassCard>
-      <h2 className="text-lg font-semibold mb-4">Portfolio Value</h2>
+      <div className="flex items-center gap-3 mb-4">
+        <h2 className="text-lg font-semibold">Portfolio Value</h2>
+        <div className="flex items-center gap-1.5 text-xs text-muted">
+          <span className="w-2.5 h-2.5 rounded-full bg-amber-400 inline-block" />
+          Entry points
+        </div>
+      </div>
       <div className="h-64">
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={chartData} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
@@ -181,9 +237,36 @@ export default function PortfolioChart({ holdings, transactions, getNavData }: P
               strokeWidth={2}
               fill="url(#portfolioGradient)"
             />
+            {entryPoints.map((ep, i) => (
+              <ReferenceDot
+                key={`entry-${i}`}
+                x={ep.date}
+                y={ep.value}
+                r={5}
+                fill="#fbbf24"
+                stroke="#fff"
+                strokeWidth={2}
+                ifOverflow="extendDomain"
+              />
+            ))}
           </AreaChart>
         </ResponsiveContainer>
       </div>
+      {/* Entry points legend */}
+      {entryPoints.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {entryPoints.map((ep, i) => (
+            <span key={i} className="text-[10px] text-muted bg-white/5 px-2 py-1 rounded-lg">
+              <span className="text-amber-400 font-bold mr-1">&#9679;</span>
+              {formatMFDate(ep.date)} &middot; {formatINR(ep.amount)}
+              {ep.funds.length <= 2
+                ? ` (${ep.funds.map(f => f.split(' ').slice(0, 2).join(' ')).join(', ')})`
+                : ` (${ep.funds.length} funds)`
+              }
+            </span>
+          ))}
+        </div>
+      )}
     </GlassCard>
   );
 }

@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useMemo } from 'react';
-import { FundWithCurrentData, PortfolioSummary } from '@/types/portfolio';
+import { FundWithCurrentData, PortfolioSummary, Transaction } from '@/types/portfolio';
 import { MFSchemeData } from '@/types/mf-api';
 import { formatINR, formatPercent, formatDate } from '@/lib/formatters';
 import ReturnText from '@/components/ui/ReturnText';
@@ -9,16 +9,17 @@ import Badge from '@/components/ui/Badge';
 import GlassCard from '@/components/ui/GlassCard';
 import { useAISummary } from '@/hooks/useAISummary';
 import { monthlyReturns, parseMFDate } from '@/lib/calculations';
-import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
+import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceDot } from 'recharts';
 
 interface PortfolioTableProps {
   holdings: FundWithCurrentData[];
+  transactions: Transaction[];
   summary: PortfolioSummary;
   onRemove: (id: string) => void;
   getNavData: (schemeCode: number) => MFSchemeData | undefined;
 }
 
-function FundMiniChart({ holding, navData }: { holding: FundWithCurrentData; navData?: MFSchemeData }) {
+function FundMiniChart({ holding, navData, fundTransactions }: { holding: FundWithCurrentData; navData?: MFSchemeData; fundTransactions: Transaction[] }) {
   const chartData = useMemo(() => {
     if (!navData?.data || navData.data.length === 0) return [];
     const purchaseDate = new Date(holding.purchase_date);
@@ -46,6 +47,37 @@ function FundMiniChart({ holding, navData }: { holding: FundWithCurrentData; nav
     return filtered;
   }, [navData, holding.purchase_date]);
 
+  // Find entry points: match each transaction to the closest chart date
+  const entryPoints = useMemo(() => {
+    if (chartData.length === 0 || fundTransactions.length === 0) return [];
+
+    const chartDatesWithTs = chartData.map(d => ({ date: d.date, ts: parseMFDate(d.date).getTime(), nav: d.nav }));
+
+    const points: { date: string; nav: number; amount: number }[] = [];
+    for (const tx of fundTransactions) {
+      const txTs = new Date(tx.transaction_date).getTime();
+      let closest = chartDatesWithTs[0];
+      let closestDiff = Math.abs(txTs - closest.ts);
+      for (const cd of chartDatesWithTs) {
+        const diff = Math.abs(txTs - cd.ts);
+        if (diff < closestDiff) {
+          closest = cd;
+          closestDiff = diff;
+        }
+      }
+      if (closestDiff <= 3 * 86400000) {
+        // Merge if same date
+        const existing = points.find(p => p.date === closest.date);
+        if (existing) {
+          existing.amount += tx.amount;
+        } else {
+          points.push({ date: closest.date, nav: closest.nav, amount: tx.amount });
+        }
+      }
+    }
+    return points;
+  }, [chartData, fundTransactions]);
+
   if (chartData.length < 2) {
     return <p className="text-xs text-muted">Not enough NAV history to show chart.</p>;
   }
@@ -55,46 +87,80 @@ function FundMiniChart({ holding, navData }: { holding: FundWithCurrentData; nav
   const isPositive = endNav >= startNav;
 
   return (
-    <div className="h-28 w-full" onClick={e => e.stopPropagation()}>
-      <ResponsiveContainer width="100%" height="100%">
-        <AreaChart data={chartData} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
-          <defs>
-            <linearGradient id={`gradient-${holding.id}`} x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor={isPositive ? '#10b981' : '#ef4444'} stopOpacity={0.3} />
-              <stop offset="100%" stopColor={isPositive ? '#10b981' : '#ef4444'} stopOpacity={0} />
-            </linearGradient>
-          </defs>
-          <XAxis
-            dataKey="date"
-            tick={{ fontSize: 10, fill: 'var(--text-muted)' }}
-            tickLine={false}
-            axisLine={false}
-            interval="preserveStartEnd"
-            minTickGap={60}
-          />
-          <YAxis
-            domain={['dataMin', 'dataMax']}
-            hide
-          />
-          <Tooltip
-            contentStyle={{
-              background: 'rgba(15,15,20,0.9)',
-              border: '1px solid rgba(255,255,255,0.1)',
-              borderRadius: '8px',
-              fontSize: '12px',
-            }}
-            formatter={(value) => [`₹${Number(value).toFixed(2)}`, 'NAV']}
-            labelStyle={{ color: 'rgba(255,255,255,0.6)' }}
-          />
-          <Area
-            type="monotone"
-            dataKey="nav"
-            stroke={isPositive ? '#10b981' : '#ef4444'}
-            strokeWidth={1.5}
-            fill={`url(#gradient-${holding.id})`}
-          />
-        </AreaChart>
-      </ResponsiveContainer>
+    <div onClick={e => e.stopPropagation()}>
+      <div className="flex items-center gap-2 mb-1">
+        <span className="text-xs text-muted">NAV History</span>
+        {entryPoints.length > 0 && (
+          <span className="flex items-center gap-1 text-[10px] text-muted">
+            <span className="w-2 h-2 rounded-full bg-amber-400 inline-block" />
+            Your entries
+          </span>
+        )}
+      </div>
+      <div className="h-28 w-full">
+        <ResponsiveContainer width="100%" height="100%">
+          <AreaChart data={chartData} margin={{ top: 8, right: 4, bottom: 0, left: 0 }}>
+            <defs>
+              <linearGradient id={`gradient-${holding.id}`} x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor={isPositive ? '#10b981' : '#ef4444'} stopOpacity={0.3} />
+                <stop offset="100%" stopColor={isPositive ? '#10b981' : '#ef4444'} stopOpacity={0} />
+              </linearGradient>
+            </defs>
+            <XAxis
+              dataKey="date"
+              tick={{ fontSize: 10, fill: 'var(--text-muted)' }}
+              tickLine={false}
+              axisLine={false}
+              interval="preserveStartEnd"
+              minTickGap={60}
+            />
+            <YAxis
+              domain={['dataMin', 'dataMax']}
+              hide
+            />
+            <Tooltip
+              contentStyle={{
+                background: 'rgba(15,15,20,0.9)',
+                border: '1px solid rgba(255,255,255,0.1)',
+                borderRadius: '8px',
+                fontSize: '12px',
+              }}
+              formatter={(value) => [`₹${Number(value).toFixed(2)}`, 'NAV']}
+              labelStyle={{ color: 'rgba(255,255,255,0.6)' }}
+            />
+            <Area
+              type="monotone"
+              dataKey="nav"
+              stroke={isPositive ? '#10b981' : '#ef4444'}
+              strokeWidth={1.5}
+              fill={`url(#gradient-${holding.id})`}
+            />
+            {entryPoints.map((ep, i) => (
+              <ReferenceDot
+                key={`entry-${i}`}
+                x={ep.date}
+                y={ep.nav}
+                r={4}
+                fill="#fbbf24"
+                stroke="#fff"
+                strokeWidth={1.5}
+                ifOverflow="extendDomain"
+              />
+            ))}
+          </AreaChart>
+        </ResponsiveContainer>
+      </div>
+      {/* Entry labels below chart */}
+      {entryPoints.length > 0 && (
+        <div className="mt-1.5 flex flex-wrap gap-1.5">
+          {entryPoints.map((ep, i) => (
+            <span key={i} className="text-[10px] text-muted bg-white/5 px-1.5 py-0.5 rounded">
+              <span className="text-amber-400 mr-0.5">&#9679;</span>
+              {ep.date} &middot; ₹{ep.amount.toLocaleString('en-IN')}
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -146,7 +212,7 @@ function FundInsight({ holding, navData }: { holding: FundWithCurrentData; navDa
   );
 }
 
-export default function PortfolioTable({ holdings, summary, onRemove, getNavData }: PortfolioTableProps) {
+export default function PortfolioTable({ holdings, transactions, summary, onRemove, getNavData }: PortfolioTableProps) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   if (holdings.length === 0) return null;
@@ -155,9 +221,13 @@ export default function PortfolioTable({ holdings, summary, onRemove, getNavData
     <div className="space-y-3">
       <h2 className="text-lg font-semibold">Holdings</h2>
       {holdings.map((holding) => {
-        const weight = summary.currentValue > 0
+        const investedWeight = summary.totalInvested > 0
+          ? (holding.invested_amount / summary.totalInvested) * 100
+          : 0;
+        const currentWeight = summary.currentValue > 0
           ? (holding.currentValue / summary.currentValue) * 100
           : 0;
+        const drift = currentWeight - investedWeight;
 
         return (
           <GlassCard
@@ -168,11 +238,21 @@ export default function PortfolioTable({ holdings, summary, onRemove, getNavData
           >
             <div className="flex flex-col sm:flex-row sm:items-center gap-3">
               <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <p className="font-medium text-sm truncate">{holding.scheme_name}</p>
-                  <span className="text-xs font-semibold text-accent-light shrink-0">
-                    {weight.toFixed(1)}%
-                  </span>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <span className="text-[10px] text-muted px-1.5 py-0.5 rounded bg-white/5" title="Invested weight">
+                      INV {investedWeight.toFixed(1)}%
+                    </span>
+                    <span className="text-[10px] font-semibold text-accent-light px-1.5 py-0.5 rounded bg-accent-light/10" title="Current weight (drifted)">
+                      CUR {currentWeight.toFixed(1)}%
+                    </span>
+                    {Math.abs(drift) >= 0.1 && (
+                      <span className={`text-[10px] px-1 py-0.5 rounded ${drift > 0 ? 'text-green bg-green/10' : 'text-red bg-red/10'}`} title="Drift from invested weight">
+                        {drift > 0 ? '▲' : '▼'}{Math.abs(drift).toFixed(1)}%
+                      </span>
+                    )}
+                  </div>
                 </div>
                 <div className="flex items-center gap-2 mt-1">
                   {holding.category && (
@@ -182,12 +262,20 @@ export default function PortfolioTable({ holdings, summary, onRemove, getNavData
                     {holding.units.toFixed(3)} units &middot; Bought {formatDate(holding.purchase_date)}
                   </span>
                 </div>
-                {/* Weight bar */}
-                <div className="mt-2 h-1 rounded-full bg-white/5 overflow-hidden">
-                  <div
-                    className="h-full rounded-full bg-accent-light/60"
-                    style={{ width: `${Math.min(weight, 100)}%` }}
-                  />
+                {/* Dual weight bar */}
+                <div className="mt-2 flex items-center gap-1.5">
+                  <div className="flex-1 h-1 rounded-full bg-white/5 overflow-hidden relative">
+                    <div
+                      className="absolute h-full rounded-full bg-white/20"
+                      style={{ width: `${Math.min(investedWeight, 100)}%` }}
+                      title={`Invested: ${investedWeight.toFixed(1)}%`}
+                    />
+                    <div
+                      className="absolute h-full rounded-full bg-accent-light/60"
+                      style={{ width: `${Math.min(currentWeight, 100)}%` }}
+                      title={`Current: ${currentWeight.toFixed(1)}%`}
+                    />
+                  </div>
                 </div>
               </div>
 
@@ -222,7 +310,11 @@ export default function PortfolioTable({ holdings, summary, onRemove, getNavData
 
             {expandedId === holding.id && (
               <div className="mt-3 pt-3 border-t border-white/5 space-y-3">
-                <FundMiniChart holding={holding} navData={getNavData(holding.scheme_code)} />
+                <FundMiniChart
+                  holding={holding}
+                  navData={getNavData(holding.scheme_code)}
+                  fundTransactions={transactions.filter(t => t.scheme_code === holding.scheme_code)}
+                />
                 <FundInsight holding={holding} navData={getNavData(holding.scheme_code)} />
               </div>
             )}
