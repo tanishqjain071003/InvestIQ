@@ -128,69 +128,6 @@ export default function PortfolioChart({ holdings, transactions, getNavData }: P
     });
   }, [holdings, transactions, getNavData]);
 
-  // Build TWR (time-weighted return) index: smooth line that strips out cash flow effects
-  // For each day, return = (value_today - inflow_today) / value_yesterday - 1
-  // Index compounds these returns from a starting base = first day's value
-  const twrData = useMemo(() => {
-    if (chartData.length < 2) return [];
-
-    // Build a map of inflows per chart date.
-    // CRITICAL: match each tx to the first chart date ON OR AFTER the tx date,
-    // because that's the first date whose portfolio value includes the new units.
-    // (Units are added via getUnitsAtDate when tx.date <= chartDate.)
-    // Matching to the *closest* date can point to a pre-tx day, producing a
-    // catastrophic negative-then-positive jump in the index.
-    const chartDatesSorted = chartData
-      .map(d => ({ date: d.date, ts: parseMFDate(d.date).getTime() }))
-      .sort((a, b) => a.ts - b.ts);
-
-    const inflowByDate = new Map<string, number>();
-    for (const tx of transactions) {
-      const txTs = new Date(tx.transaction_date).getTime();
-      // Binary search for first chart date >= txTs
-      let lo = 0, hi = chartDatesSorted.length - 1, matchIdx = -1;
-      while (lo <= hi) {
-        const mid = (lo + hi) >> 1;
-        if (chartDatesSorted[mid].ts >= txTs) {
-          matchIdx = mid;
-          hi = mid - 1;
-        } else {
-          lo = mid + 1;
-        }
-      }
-      if (matchIdx === -1) continue; // tx is after all chart dates (shouldn't happen)
-      // Only match if within ~7 days forward (covers weekends/holidays)
-      if (chartDatesSorted[matchIdx].ts - txTs > 7 * 86400000) continue;
-      const d = chartDatesSorted[matchIdx].date;
-      inflowByDate.set(d, (inflowByDate.get(d) || 0) + tx.amount);
-    }
-
-    // Compound TWR index
-    const result: { date: string; twr: number }[] = [];
-    let indexValue = chartData[0].value; // start at actual first value
-    result.push({ date: chartData[0].date, twr: Math.round(indexValue) });
-
-    for (let i = 1; i < chartData.length; i++) {
-      const prevValue = chartData[i - 1].value;
-      const currValue = chartData[i].value;
-      const inflow = inflowByDate.get(chartData[i].date) || 0;
-
-      // Denominator is prevValue + inflow (the capital actually at risk today)
-      // if we treat the inflow as happening at start-of-day. This is the
-      // Modified Dietz simplification for same-day inflows and is numerically
-      // safer than (curr - inflow) / prev when prev is small.
-      const denom = prevValue + inflow;
-      if (denom > 0) {
-        const dailyReturn = currValue / denom - 1;
-        indexValue = indexValue * (1 + dailyReturn);
-      }
-
-      result.push({ date: chartData[i].date, twr: Math.round(indexValue) });
-    }
-
-    return result;
-  }, [chartData, transactions]);
-
   // Build entry points: for each transaction, find the closest chart date and its value
   const entryPoints = useMemo(() => {
     if (chartData.length === 0 || transactions.length === 0) return [];
@@ -241,62 +178,30 @@ export default function PortfolioChart({ holdings, transactions, getNavData }: P
     return points;
   }, [chartData, transactions]);
 
-  // Merge chartData + twrData into combined data
-  const combinedData = useMemo(() => {
-    const twrMap = new Map<string, number>();
-    for (const d of twrData) {
-      twrMap.set(d.date, d.twr);
-    }
-    return chartData.map(d => ({
-      date: d.date,
-      value: d.value,
-      twr: twrMap.get(d.date) ?? d.value,
-    }));
-  }, [chartData, twrData]);
+  if (chartData.length < 2) return null;
 
-  if (combinedData.length < 2) return null;
-
-  const allValues = combinedData.flatMap(d => [d.value, d.twr]);
-  const minValue = Math.min(...allValues);
-  const maxValue = Math.max(...allValues);
+  const minValue = Math.min(...chartData.map(d => d.value));
+  const maxValue = Math.max(...chartData.map(d => d.value));
   const padding = (maxValue - minValue) * 0.05 || 100;
-  const isPositive = combinedData[combinedData.length - 1].value >= combinedData[0].value;
+  const isPositive = chartData[chartData.length - 1].value >= chartData[0].value;
   const color = isPositive ? '#22c55e' : '#ef4444';
-  const twrEnd = combinedData[combinedData.length - 1].twr;
-  const twrStart = combinedData[0].twr;
-  const twrPositive = twrEnd >= twrStart;
-  const twrColor = twrPositive ? '#06b6d4' : '#f97316'; // cyan / orange
 
   return (
     <GlassCard>
-      <div className="flex items-center gap-4 mb-4 flex-wrap">
+      <div className="flex items-center gap-3 mb-4">
         <h2 className="text-lg font-semibold">Portfolio Value</h2>
-        <div className="flex items-center gap-3 text-xs text-muted">
-          <span className="flex items-center gap-1">
-            <span className="w-3 h-0.5 rounded inline-block" style={{ background: color }} />
-            Actual
-          </span>
-          <span className="flex items-center gap-1">
-            <span className="w-3 h-0.5 rounded inline-block" style={{ background: twrColor }} />
-            Pure Returns
-          </span>
-          <span className="flex items-center gap-1">
-            <span className="w-2.5 h-2.5 rounded-full bg-amber-400 inline-block" />
-            Entry points
-          </span>
+        <div className="flex items-center gap-1.5 text-xs text-muted">
+          <span className="w-2.5 h-2.5 rounded-full bg-amber-400 inline-block" />
+          Entry points
         </div>
       </div>
-      <div className="h-72">
+      <div className="h-64">
         <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={combinedData} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
+          <AreaChart data={chartData} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
             <defs>
               <linearGradient id="portfolioGradient" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor={color} stopOpacity={0.2} />
+                <stop offset="5%" stopColor={color} stopOpacity={0.3} />
                 <stop offset="95%" stopColor={color} stopOpacity={0} />
-              </linearGradient>
-              <linearGradient id="twrGradient" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor={twrColor} stopOpacity={0.15} />
-                <stop offset="95%" stopColor={twrColor} stopOpacity={0} />
               </linearGradient>
             </defs>
             <XAxis
@@ -317,24 +222,13 @@ export default function PortfolioChart({ holdings, transactions, getNavData }: P
             />
             <Tooltip
               contentStyle={{
-                background: 'rgba(0,0,0,0.9)',
+                background: 'rgba(0,0,0,0.8)',
                 border: '1px solid rgba(255,255,255,0.1)',
                 borderRadius: '12px',
                 padding: '8px 12px',
               }}
               labelFormatter={(d) => formatMFDate(d as string)}
-              formatter={(value, name) => [
-                formatINR(value as number),
-                name === 'value' ? 'Actual Value' : 'Pure Returns',
-              ]}
-            />
-            <Area
-              type="monotone"
-              dataKey="twr"
-              stroke={twrColor}
-              strokeWidth={1.5}
-              strokeDasharray="6 3"
-              fill="url(#twrGradient)"
+              formatter={(value) => [formatINR(value as number), 'Value']}
             />
             <Area
               type="monotone"
