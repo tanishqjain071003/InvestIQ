@@ -128,6 +128,54 @@ export default function PortfolioChart({ holdings, transactions, getNavData }: P
     });
   }, [holdings, transactions, getNavData]);
 
+  // Build TWR (time-weighted return) index: smooth line that strips out cash flow effects
+  // For each day, return = (value_today - inflow_today) / value_yesterday - 1
+  // Index compounds these returns from a starting base = first day's value
+  const twrData = useMemo(() => {
+    if (chartData.length < 2) return [];
+
+    // Build a map of inflows per chart date (match tx to closest chart date within 3 days)
+    const chartDatesForTwr = chartData.map(d => ({ date: d.date, ts: parseMFDate(d.date).getTime() }));
+    const inflowByDate = new Map<string, number>();
+
+    for (const tx of transactions) {
+      const txTs = new Date(tx.transaction_date).getTime();
+      let closest = chartDatesForTwr[0];
+      let closestDiff = Math.abs(txTs - closest.ts);
+      for (const cd of chartDatesForTwr) {
+        const diff = Math.abs(txTs - cd.ts);
+        if (diff < closestDiff) {
+          closest = cd;
+          closestDiff = diff;
+        }
+      }
+      if (closestDiff <= 3 * 86400000) {
+        inflowByDate.set(closest.date, (inflowByDate.get(closest.date) || 0) + tx.amount);
+      }
+    }
+
+    // Compound TWR index
+    const result: { date: string; twr: number }[] = [];
+    let indexValue = chartData[0].value; // start at actual first value
+    result.push({ date: chartData[0].date, twr: Math.round(indexValue) });
+
+    for (let i = 1; i < chartData.length; i++) {
+      const prevValue = chartData[i - 1].value;
+      const currValue = chartData[i].value;
+      const inflow = inflowByDate.get(chartData[i].date) || 0;
+
+      if (prevValue > 0) {
+        // Daily return = (today's value - today's inflow) / yesterday's value - 1
+        const dailyReturn = (currValue - inflow) / prevValue - 1;
+        indexValue = indexValue * (1 + dailyReturn);
+      }
+
+      result.push({ date: chartData[i].date, twr: Math.round(indexValue) });
+    }
+
+    return result;
+  }, [chartData, transactions]);
+
   // Build entry points: for each transaction, find the closest chart date and its value
   const entryPoints = useMemo(() => {
     if (chartData.length === 0 || transactions.length === 0) return [];
@@ -178,30 +226,62 @@ export default function PortfolioChart({ holdings, transactions, getNavData }: P
     return points;
   }, [chartData, transactions]);
 
-  if (chartData.length < 2) return null;
+  // Merge chartData + twrData into combined data
+  const combinedData = useMemo(() => {
+    const twrMap = new Map<string, number>();
+    for (const d of twrData) {
+      twrMap.set(d.date, d.twr);
+    }
+    return chartData.map(d => ({
+      date: d.date,
+      value: d.value,
+      twr: twrMap.get(d.date) ?? d.value,
+    }));
+  }, [chartData, twrData]);
 
-  const minValue = Math.min(...chartData.map(d => d.value));
-  const maxValue = Math.max(...chartData.map(d => d.value));
+  if (combinedData.length < 2) return null;
+
+  const allValues = combinedData.flatMap(d => [d.value, d.twr]);
+  const minValue = Math.min(...allValues);
+  const maxValue = Math.max(...allValues);
   const padding = (maxValue - minValue) * 0.05 || 100;
-  const isPositive = chartData[chartData.length - 1].value >= chartData[0].value;
+  const isPositive = combinedData[combinedData.length - 1].value >= combinedData[0].value;
   const color = isPositive ? '#22c55e' : '#ef4444';
+  const twrEnd = combinedData[combinedData.length - 1].twr;
+  const twrStart = combinedData[0].twr;
+  const twrPositive = twrEnd >= twrStart;
+  const twrColor = twrPositive ? '#06b6d4' : '#f97316'; // cyan / orange
 
   return (
     <GlassCard>
-      <div className="flex items-center gap-3 mb-4">
+      <div className="flex items-center gap-4 mb-4 flex-wrap">
         <h2 className="text-lg font-semibold">Portfolio Value</h2>
-        <div className="flex items-center gap-1.5 text-xs text-muted">
-          <span className="w-2.5 h-2.5 rounded-full bg-amber-400 inline-block" />
-          Entry points
+        <div className="flex items-center gap-3 text-xs text-muted">
+          <span className="flex items-center gap-1">
+            <span className="w-3 h-0.5 rounded inline-block" style={{ background: color }} />
+            Actual
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="w-3 h-0.5 rounded inline-block" style={{ background: twrColor }} />
+            Pure Returns
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="w-2.5 h-2.5 rounded-full bg-amber-400 inline-block" />
+            Entry points
+          </span>
         </div>
       </div>
-      <div className="h-64">
+      <div className="h-72">
         <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={chartData} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
+          <AreaChart data={combinedData} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
             <defs>
               <linearGradient id="portfolioGradient" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor={color} stopOpacity={0.3} />
+                <stop offset="5%" stopColor={color} stopOpacity={0.2} />
                 <stop offset="95%" stopColor={color} stopOpacity={0} />
+              </linearGradient>
+              <linearGradient id="twrGradient" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%" stopColor={twrColor} stopOpacity={0.15} />
+                <stop offset="95%" stopColor={twrColor} stopOpacity={0} />
               </linearGradient>
             </defs>
             <XAxis
@@ -222,13 +302,24 @@ export default function PortfolioChart({ holdings, transactions, getNavData }: P
             />
             <Tooltip
               contentStyle={{
-                background: 'rgba(0,0,0,0.8)',
+                background: 'rgba(0,0,0,0.9)',
                 border: '1px solid rgba(255,255,255,0.1)',
                 borderRadius: '12px',
                 padding: '8px 12px',
               }}
               labelFormatter={(d) => formatMFDate(d as string)}
-              formatter={(value) => [formatINR(value as number), 'Value']}
+              formatter={(value, name) => [
+                formatINR(value as number),
+                name === 'value' ? 'Actual Value' : 'Pure Returns',
+              ]}
+            />
+            <Area
+              type="monotone"
+              dataKey="twr"
+              stroke={twrColor}
+              strokeWidth={1.5}
+              strokeDasharray="6 3"
+              fill="url(#twrGradient)"
             />
             <Area
               type="monotone"
