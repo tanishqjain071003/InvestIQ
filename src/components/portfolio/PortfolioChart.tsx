@@ -134,24 +134,35 @@ export default function PortfolioChart({ holdings, transactions, getNavData }: P
   const twrData = useMemo(() => {
     if (chartData.length < 2) return [];
 
-    // Build a map of inflows per chart date (match tx to closest chart date within 3 days)
-    const chartDatesForTwr = chartData.map(d => ({ date: d.date, ts: parseMFDate(d.date).getTime() }));
-    const inflowByDate = new Map<string, number>();
+    // Build a map of inflows per chart date.
+    // CRITICAL: match each tx to the first chart date ON OR AFTER the tx date,
+    // because that's the first date whose portfolio value includes the new units.
+    // (Units are added via getUnitsAtDate when tx.date <= chartDate.)
+    // Matching to the *closest* date can point to a pre-tx day, producing a
+    // catastrophic negative-then-positive jump in the index.
+    const chartDatesSorted = chartData
+      .map(d => ({ date: d.date, ts: parseMFDate(d.date).getTime() }))
+      .sort((a, b) => a.ts - b.ts);
 
+    const inflowByDate = new Map<string, number>();
     for (const tx of transactions) {
       const txTs = new Date(tx.transaction_date).getTime();
-      let closest = chartDatesForTwr[0];
-      let closestDiff = Math.abs(txTs - closest.ts);
-      for (const cd of chartDatesForTwr) {
-        const diff = Math.abs(txTs - cd.ts);
-        if (diff < closestDiff) {
-          closest = cd;
-          closestDiff = diff;
+      // Binary search for first chart date >= txTs
+      let lo = 0, hi = chartDatesSorted.length - 1, matchIdx = -1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (chartDatesSorted[mid].ts >= txTs) {
+          matchIdx = mid;
+          hi = mid - 1;
+        } else {
+          lo = mid + 1;
         }
       }
-      if (closestDiff <= 3 * 86400000) {
-        inflowByDate.set(closest.date, (inflowByDate.get(closest.date) || 0) + tx.amount);
-      }
+      if (matchIdx === -1) continue; // tx is after all chart dates (shouldn't happen)
+      // Only match if within ~7 days forward (covers weekends/holidays)
+      if (chartDatesSorted[matchIdx].ts - txTs > 7 * 86400000) continue;
+      const d = chartDatesSorted[matchIdx].date;
+      inflowByDate.set(d, (inflowByDate.get(d) || 0) + tx.amount);
     }
 
     // Compound TWR index
@@ -164,9 +175,13 @@ export default function PortfolioChart({ holdings, transactions, getNavData }: P
       const currValue = chartData[i].value;
       const inflow = inflowByDate.get(chartData[i].date) || 0;
 
-      if (prevValue > 0) {
-        // Daily return = (today's value - today's inflow) / yesterday's value - 1
-        const dailyReturn = (currValue - inflow) / prevValue - 1;
+      // Denominator is prevValue + inflow (the capital actually at risk today)
+      // if we treat the inflow as happening at start-of-day. This is the
+      // Modified Dietz simplification for same-day inflows and is numerically
+      // safer than (curr - inflow) / prev when prev is small.
+      const denom = prevValue + inflow;
+      if (denom > 0) {
+        const dailyReturn = currValue / denom - 1;
         indexValue = indexValue * (1 + dailyReturn);
       }
 
